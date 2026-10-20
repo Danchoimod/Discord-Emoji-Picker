@@ -6,15 +6,23 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, Stroke, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThreadId, SetProcessWorkingSetSize,
+};
 use windows_sys::Win32::UI::Accessibility::SetWinEventHook;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow,
-    SetForegroundWindow, MSG,
+    DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowLongW, GetWindowThreadProcessId,
+    IsWindow, SetForegroundWindow, SetWindowLongW, GWL_STYLE, MSG, WS_MINIMIZEBOX, WS_SYSMENU,
 };
+
+fn trim_process_memory() {
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -159,6 +167,17 @@ impl EmojiApp {
 
         spawn_focus_tracker(hwnd);
 
+        if hwnd != 0 {
+            unsafe {
+                let style = GetWindowLongW(hwnd as _, GWL_STYLE);
+                SetWindowLongW(
+                    hwnd as _,
+                    GWL_STYLE,
+                    style | (WS_MINIMIZEBOX as i32) | (WS_SYSMENU as i32),
+                );
+            }
+        }
+
         Self {
             current_tab: Tab::Default,
             hovered: None,
@@ -247,6 +266,14 @@ impl eframe::App for EmojiApp {
                     );
 
                     if min_btn.clicked() {
+                        self.hovered = None;
+                        // Giải phóng toàn bộ texture ảnh/GIF đang chiếm RAM & VRAM
+                        ctx.forget_all_images();
+                        // Thu gọn Working Set RAM trên Windows
+                        trim_process_memory();
+                        // Trả lại focus ngay lập tức cho cửa sổ làm việc trước đó (Discord)
+                        restore_focus(LAST_HWND.load(Ordering::SeqCst));
+                        // Thu nhỏ cửa sổ
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                 });
