@@ -11,12 +11,13 @@ use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Accessibility::SetWinEventHook;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
-    ShowWindow, SW_HIDE, SW_SHOWNA,
+    DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, MSG, SW_HIDE, SW_SHOWNA,
 };
 
 #[link(name = "user32")]
@@ -25,20 +26,59 @@ unsafe extern "system" {
 }
 
 const VK_V: u16 = 0x56;
+const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
+const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 
 /// Cửa sổ ngoài (Discord...) đang focus gần nhất
 static LAST_HWND: AtomicIsize = AtomicIsize::new(0);
+static OWN_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Thread nền: ghi nhớ cửa sổ foreground không phải của app mình
+unsafe extern "system" fn win_event_proc(
+    _h_win_event_hook: *mut std::ffi::c_void,
+    event: u32,
+    hwnd: *mut std::ffi::c_void,
+    id_object: i32,
+    id_child: i32,
+    _id_event_thread: u32,
+    _dwms_event_time: u32,
+) {
+    if event == EVENT_SYSTEM_FOREGROUND && id_object == 0 && id_child == 0 && !hwnd.is_null() {
+        let own = OWN_HWND.load(Ordering::SeqCst);
+        let val = hwnd as isize;
+        if val != own {
+            LAST_HWND.store(val, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Dùng SetWinEventHook để lắng nghe sự kiện đổi Foreground Window (0% CPU, không polling)
 fn spawn_focus_tracker(own_hwnd: isize) {
-    std::thread::spawn(move || loop {
-        unsafe {
-            let fg = GetForegroundWindow() as isize;
-            if fg != 0 && fg != own_hwnd {
-                LAST_HWND.store(fg, Ordering::SeqCst);
+    OWN_HWND.store(own_hwnd, Ordering::SeqCst);
+    // Lưu ngay foreground hiện tại
+    unsafe {
+        let fg = GetForegroundWindow() as isize;
+        if fg != 0 && fg != own_hwnd {
+            LAST_HWND.store(fg, Ordering::SeqCst);
+        }
+    }
+
+    std::thread::spawn(move || unsafe {
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            std::ptr::null_mut(),
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+
+        if !hook.is_null() {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                DispatchMessageW(&msg);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(80));
     });
 }
 
@@ -133,6 +173,7 @@ struct EmojiApp {
     current_tab: Tab,
     hwnd: isize,
     _tray_icon: TrayIcon,
+    hovered: Option<&'static str>,
 }
 
 impl EmojiApp {
@@ -163,6 +204,7 @@ impl EmojiApp {
                 {
                     if win_is_visible(hwnd) {
                         win_hide(hwnd);
+                        ctx.forget_all_images();
                     } else {
                         win_show(hwnd);
                         ctx.request_repaint();
@@ -188,11 +230,13 @@ impl EmojiApp {
             current_tab: Tab::Default,
             hwnd,
             _tray_icon: tray_icon,
+            hovered: None,
         }
     }
 
-    fn hide(&self) {
+    fn hide(&self, ctx: &egui::Context) {
         win_hide(self.hwnd);
+        ctx.forget_all_images(); // Giải phóng toàn bộ texture RAM khi ẩn xuống khay hệ thống
     }
 
     fn copy_emoji(&self, url: &str) {
@@ -211,10 +255,13 @@ impl EmojiApp {
 
 impl eframe::App for EmojiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Chỉ repaint animation khi cửa sổ đang hiển thị để tối ưu hóa CPU
-        if win_is_visible(self.hwnd) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        // Nếu cửa sổ đang bị ẩn (trong System Tray), sleep ngắn để event loop winit không bị busy spin
+        if !win_is_visible(self.hwnd) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            return;
         }
+
+        let mut new_hovered: Option<&'static str> = None;
 
         let panel_frame = Frame::default()
             .fill(Color32::from_rgb(30, 31, 34))
@@ -222,7 +269,7 @@ impl eframe::App for EmojiApp {
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::same(12));
 
-        let mut selected_emoji: Option<&str> = None;
+        let mut selected_emoji: Option<&'static str> = None;
         let mut close = false;
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
@@ -332,7 +379,7 @@ impl eframe::App for EmojiApp {
                 Tab::Omori2 => emojis::OMORI2_EMOJIS,
             };
 
-            let items: Vec<&str> = emojis_list.iter().copied().filter(|u| !u.is_empty()).collect();
+            let items: Vec<&'static str> = emojis_list.iter().copied().filter(|u| !u.is_empty()).collect();
             const CELL: f32 = 44.0;
             const GAP: f32 = 8.0;
 
@@ -342,6 +389,7 @@ impl eframe::App for EmojiApp {
             let avail = ui.available_width() - ui.spacing().scroll.bar_width - 4.0;
             let cols = (((avail + GAP) / (CELL + GAP)).floor() as usize).max(1);
             let rows = items.len().div_ceil(cols);
+            let current_hovered = self.hovered;
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -349,12 +397,18 @@ impl eframe::App for EmojiApp {
                     for row in row_range {
                         ui.horizontal(|ui| {
                             for &url in items.iter().skip(row * cols).take(cols) {
-                                // Bỏ query string để loader nhận diện đuôi .gif
-                                let clean = url.split('?').next().unwrap_or(url);
-                                let display_url = if clean.contains("animated=true") {
-                                    clean.replace(".webp", ".gif")
+                                let base = url.split('?').next().unwrap_or(url);
+                                let is_hot = current_hovered == Some(url);
+
+                                // Chỉ phát GIF động khi chuột đang hover vào chính emoji này
+                                let display_url = if is_hot {
+                                    if base.contains(".webp") && url.contains("animated=true") {
+                                        base.replace(".webp", ".gif")
+                                    } else {
+                                        base.to_string()
+                                    }
                                 } else {
-                                    clean.to_string()
+                                    base.replace(".gif", ".png")
                                 };
 
                                 let img = egui::Image::new(display_url)
@@ -369,6 +423,10 @@ impl eframe::App for EmojiApp {
                                         .min_size(Vec2::new(CELL, CELL)),
                                 );
 
+                                if response.hovered() {
+                                    new_hovered = Some(url);
+                                }
+
                                 if response.clicked() {
                                     selected_emoji = Some(url);
                                 }
@@ -378,11 +436,20 @@ impl eframe::App for EmojiApp {
                 });
         });
 
+        // Chỉ repaint khi trạng thái hover thay đổi hoặc đang hover xem GIF
+        if self.hovered != new_hovered {
+            self.hovered = new_hovered;
+            ctx.request_repaint();
+        }
+        if self.hovered.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+
         if let Some(url) = selected_emoji {
             self.copy_emoji(url);
         }
         if close {
-            self.hide();
+            self.hide(ctx);
         }
     }
 }
