@@ -223,7 +223,7 @@ impl eframe::App for EmojiApp {
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // Thanh tiêu đề có thể nắm kéo chuột để di chuyển cửa sổ
             ui.horizontal(|ui| {
-                // Tiêu đề đóng vai trò là tay nắm kéo cửa sổ (Drag Window)
+                // Tiêu đề đóng vai trò là tay nắm kéo cửa sổ (Drag Window), không cho phép bôi đen text (không có con trỏ I-beam)
                 let title_response = ui.add(
                     egui::Label::new(
                         egui::RichText::new("✨ Discord Emojis")
@@ -231,8 +231,13 @@ impl eframe::App for EmojiApp {
                             .strong()
                             .color(Color32::WHITE),
                     )
-                    .sense(egui::Sense::click_and_drag()),
+                    .selectable(false)
+                    .sense(egui::Sense::drag()),
                 );
+
+                if title_response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                }
 
                 if title_response.drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -393,8 +398,8 @@ fn create_default_tray_icon() -> tray_icon::Icon {
 fn main() -> Result<(), eframe::Error> {
     // 1. Tạo Context Menu cho Khay hệ thống
     let tray_menu = Menu::new();
-    let quit_item = MenuItem::new("Thoát", true, None);
-    let open_item = MenuItem::new("Mở bảng Emoji", true, None);
+    let quit_item = MenuItem::new("Exit", true, None);
+    let open_item = MenuItem::new("Open Emoji", true, None);
     let _ = tray_menu.append(&open_item);
     let _ = tray_menu.append(&quit_item);
 
