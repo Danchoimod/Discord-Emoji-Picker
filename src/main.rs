@@ -221,17 +221,38 @@ impl eframe::App for EmojiApp {
         let mut close = false;
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
-            // Thanh tiêu đề + Nút đóng
+            // Thanh tiêu đề có thể nắm kéo chuột để di chuyển cửa sổ
             ui.horizontal(|ui| {
-                ui.heading(
-                    egui::RichText::new("✨ Discord Emojis")
-                        .size(16.0)
-                        .strong()
-                        .color(Color32::WHITE),
+                // Tiêu đề đóng vai trò là tay nắm kéo cửa sổ (Drag Window)
+                let title_response = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("✨ Discord Emojis")
+                            .size(15.0)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .sense(egui::Sense::click_and_drag()),
                 );
 
+                if title_response.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Nút X đóng cửa sổ - dùng ký tự 'X' chuẩn ASCII kèm màu sắc nổi bật
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(egui::RichText::new("✕").size(14.0).color(Color32::GRAY)).clicked() {
+                    let close_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("X")
+                                .size(13.0)
+                                .strong()
+                                .color(Color32::from_rgb(220, 221, 222)),
+                        )
+                        .fill(Color32::from_rgb(43, 45, 49))
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(Vec2::new(26.0, 24.0)),
+                    );
+
+                    if close_btn.clicked() {
                         close = true;
                     }
                 });
@@ -239,19 +260,53 @@ impl eframe::App for EmojiApp {
 
             ui.add_space(8.0);
 
-            // Tab Buttons
+            // Tab Buttons: Active có nền màu tím Discord/xanh, Inactive có nền tối với text trắng sáng
             ui.horizontal(|ui| {
-                let default_btn = ui.selectable_label(
-                    self.current_tab == Tab::Default,
-                    egui::RichText::new("General").strong(),
+                let is_default = self.current_tab == Tab::Default;
+                let default_text_color = if is_default {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(240, 240, 245) // Màu trắng sáng khi không active
+                };
+                let default_bg = if is_default {
+                    Color32::from_rgb(88, 101, 242) // Tím Discord đặc trưng
+                } else {
+                    Color32::from_rgb(43, 45, 49)
+                };
+
+                let default_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("General")
+                            .strong()
+                            .color(default_text_color),
+                    )
+                    .fill(default_bg)
+                    .corner_radius(CornerRadius::same(6)),
                 );
                 if default_btn.clicked() {
                     self.current_tab = Tab::Default;
                 }
 
-                let omori_btn = ui.selectable_label(
-                    self.current_tab == Tab::Omori2,
-                    egui::RichText::new("Omori 2").strong(),
+                let is_omori = self.current_tab == Tab::Omori2;
+                let omori_text_color = if is_omori {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(240, 240, 245) // Màu trắng sáng khi không active
+                };
+                let omori_bg = if is_omori {
+                    Color32::from_rgb(88, 101, 242)
+                } else {
+                    Color32::from_rgb(43, 45, 49)
+                };
+
+                let omori_btn = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new("Omori 2")
+                            .strong()
+                            .color(omori_text_color),
+                    )
+                    .fill(omori_bg)
+                    .corner_radius(CornerRadius::same(6)),
                 );
                 if omori_btn.clicked() {
                     self.current_tab = Tab::Omori2;
