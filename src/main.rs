@@ -6,10 +6,6 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, Stroke, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
-    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-};
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Accessibility::SetWinEventHook;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -17,7 +13,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, MSG, SW_HIDE, SW_SHOWNA,
+    SetForegroundWindow, MSG,
 };
 
 #[link(name = "user32")]
@@ -32,6 +28,7 @@ const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 /// Cửa sổ ngoài (Discord...) đang focus gần nhất
 static LAST_HWND: AtomicIsize = AtomicIsize::new(0);
 static OWN_HWND: AtomicIsize = AtomicIsize::new(0);
+
 
 unsafe extern "system" fn win_event_proc(
     _h_win_event_hook: *mut std::ffi::c_void,
@@ -105,31 +102,8 @@ fn restore_focus(target: isize) {
     }
 }
 
-fn win_show(hwnd: isize) {
-    if hwnd == 0 {
-        return;
-    }
-    unsafe {
-        // SW_SHOWNA: hiện mà không cướp focus
-        ShowWindow(hwnd as _, SW_SHOWNA);
-    }
-}
 
-fn win_hide(hwnd: isize) {
-    if hwnd == 0 {
-        return;
-    }
-    unsafe {
-        ShowWindow(hwnd as _, SW_HIDE);
-    }
-}
 
-fn win_is_visible(hwnd: isize) -> bool {
-    if hwnd == 0 {
-        return false;
-    }
-    unsafe { IsWindowVisible(hwnd as _) != 0 }
-}
 
 fn key_input(vk: u16, up: bool) -> INPUT {
     INPUT {
@@ -171,18 +145,11 @@ enum Tab {
 
 struct EmojiApp {
     current_tab: Tab,
-    hwnd: isize,
-    _tray_icon: TrayIcon,
     hovered: Option<&'static str>,
 }
 
 impl EmojiApp {
-    fn new(
-        cc: &eframe::CreationContext<'_>,
-        tray_icon: TrayIcon,
-        quit_id: tray_icon::menu::MenuId,
-        open_id: tray_icon::menu::MenuId,
-    ) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let hwnd: isize = match cc.window_handle().map(|h| h.as_raw()) {
@@ -192,51 +159,10 @@ impl EmojiApp {
 
         spawn_focus_tracker(hwnd);
 
-        // Click trái vào tray -> toggle
-        {
-            let ctx = cc.egui_ctx.clone();
-            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } = event
-                {
-                    if win_is_visible(hwnd) {
-                        win_hide(hwnd);
-                        ctx.forget_all_images();
-                    } else {
-                        win_show(hwnd);
-                        ctx.request_repaint();
-                    }
-                }
-            }));
-        }
-
-        // Menu chuột phải
-        {
-            let ctx = cc.egui_ctx.clone();
-            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                if event.id == quit_id {
-                    std::process::exit(0);
-                } else if event.id == open_id {
-                    win_show(hwnd);
-                    ctx.request_repaint();
-                }
-            }));
-        }
-
         Self {
             current_tab: Tab::Default,
-            hwnd,
-            _tray_icon: tray_icon,
             hovered: None,
         }
-    }
-
-    fn hide(&self, ctx: &egui::Context) {
-        win_hide(self.hwnd);
-        ctx.forget_all_images(); // Giải phóng toàn bộ texture RAM khi ẩn xuống khay hệ thống
     }
 
     fn copy_emoji(&self, url: &str) {
@@ -255,12 +181,6 @@ impl EmojiApp {
 
 impl eframe::App for EmojiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Nếu cửa sổ đang bị ẩn (trong System Tray), sleep ngắn để event loop winit không bị busy spin
-        if !win_is_visible(self.hwnd) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            return;
-        }
-
         let mut new_hovered: Option<&'static str> = None;
 
         let panel_frame = Frame::default()
@@ -270,7 +190,6 @@ impl eframe::App for EmojiApp {
             .inner_margin(Margin::same(12));
 
         let mut selected_emoji: Option<&'static str> = None;
-        let mut close = false;
 
         egui::CentralPanel::default().frame(panel_frame).show(ctx, |ui| {
             // Thanh tiêu đề có thể nắm kéo chuột để di chuyển cửa sổ
@@ -295,7 +214,7 @@ impl eframe::App for EmojiApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
 
-                // Nút X đóng cửa sổ - dùng ký tự 'X' chuẩn ASCII kèm màu sắc nổi bật
+                // Nút điều khiển cửa sổ: Thu nhỏ (-) và Đóng (X)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close_btn = ui.add(
                         egui::Button::new(
@@ -310,7 +229,25 @@ impl eframe::App for EmojiApp {
                     );
 
                     if close_btn.clicked() {
-                        close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+
+                    ui.add_space(4.0);
+
+                    let min_btn = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new("-")
+                                .size(14.0)
+                                .strong()
+                                .color(Color32::from_rgb(220, 221, 222)),
+                        )
+                        .fill(Color32::from_rgb(43, 45, 49))
+                        .corner_radius(CornerRadius::same(6))
+                        .min_size(Vec2::new(26.0, 24.0)),
+                    );
+
+                    if min_btn.clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                 });
             });
@@ -448,57 +385,11 @@ impl eframe::App for EmojiApp {
         if let Some(url) = selected_emoji {
             self.copy_emoji(url);
         }
-        if close {
-            self.hide(ctx);
-        }
     }
-}
-
-/// Tạo icon mặc định trong bộ nhớ cho khay hệ thống (Tray Icon)
-fn create_default_tray_icon() -> tray_icon::Icon {
-    let width = 32;
-    let height = 32;
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-
-    for y in 0..height {
-        for x in 0..width {
-            let dx = (x as i32) - 16;
-            let dy = (y as i32) - 16;
-            let dist_sq = dx * dx + dy * dy;
-
-            if dist_sq <= 14 * 14 {
-                // Màu tím Discord đặc trưng (#5865F2)
-                rgba.extend_from_slice(&[88, 101, 242, 255]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
-
-    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // 1. Tạo Context Menu cho Khay hệ thống
-    let tray_menu = Menu::new();
-    let quit_item = MenuItem::new("Exit", true, None);
-    let open_item = MenuItem::new("Open Emoji", true, None);
-    let _ = tray_menu.append(&open_item);
-    let _ = tray_menu.append(&quit_item);
-
-    let quit_id = quit_item.id().clone();
-    let open_id = open_item.id().clone();
-
-    // 2. Tạo Tray Icon
-    let tray_icon = TrayIconBuilder::new()
-        .with_tooltip("Discord Emoji Picker")
-        .with_icon(create_default_tray_icon())
-        .with_menu(Box::new(tray_menu))
-        .with_menu_on_left_click(false)
-        .build()
-        .expect("Cannot create system tray icon");
-
-    // 3. Cấu hình Cửa sổ Picker: Borderless, Always On Top
+    // Cấu hình Cửa sổ Picker: Borderless, Always On Top
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Discord Emoji Picker")
@@ -513,8 +404,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "discord_emoji_picker",
         native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(EmojiApp::new(cc, tray_icon, quit_id, open_id)))
-        }),
+        Box::new(|cc| Ok(Box::new(EmojiApp::new(cc)))),
     )
 }
