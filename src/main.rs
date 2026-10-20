@@ -2,24 +2,76 @@
 
 mod emojis;
 
+use std::sync::atomic::{AtomicIsize, Ordering};
+
 use eframe::egui::{self, Color32, CornerRadius, Frame, Margin, Stroke, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
+    ShowWindow, SW_HIDE, SW_SHOWNA,
+};
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn AttachThreadInput(idAttach: u32, idAttachTo: u32, fAttach: i32) -> i32;
+}
+
+const VK_V: u16 = 0x56;
+
+/// Cửa sổ ngoài (Discord...) đang focus gần nhất
+static LAST_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Thread nền: ghi nhớ cửa sổ foreground không phải của app mình
+fn spawn_focus_tracker(own_hwnd: isize) {
+    std::thread::spawn(move || loop {
+        unsafe {
+            let fg = GetForegroundWindow() as isize;
+            if fg != 0 && fg != own_hwnd {
+                LAST_HWND.store(fg, Ordering::SeqCst);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    });
+}
+
+/// Ép focus về cửa sổ cũ (vượt giới hạn SetForegroundWindow của Windows)
+fn restore_focus(target: isize) {
+    if target == 0 {
+        return;
+    }
+    unsafe {
+        if IsWindow(target as _) == 0 {
+            return;
+        }
+        let fg = GetForegroundWindow();
+        let fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
+        let my_thread = GetCurrentThreadId();
+
+        if fg_thread != my_thread {
+            AttachThreadInput(my_thread, fg_thread, 1);
+            SetForegroundWindow(target as _);
+            AttachThreadInput(my_thread, fg_thread, 0);
+        } else {
+            SetForegroundWindow(target as _);
+        }
+    }
+}
 
 fn win_show(hwnd: isize) {
     if hwnd == 0 {
         return;
     }
     unsafe {
-        ShowWindow(hwnd as _, SW_SHOW);
-        ShowWindow(hwnd as _, SW_RESTORE);
-        SetForegroundWindow(hwnd as _);
+        // SW_SHOWNA: hiện mà không cướp focus
+        ShowWindow(hwnd as _, SW_SHOWNA);
     }
 }
 
@@ -37,6 +89,38 @@ fn win_is_visible(hwnd: isize) -> bool {
         return false;
     }
     unsafe { IsWindowVisible(hwnd as _) != 0 }
+}
+
+fn key_input(vk: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Giả lập Ctrl+V vào cửa sổ đang giữ focus (Discord)
+fn send_ctrl_v() {
+    let inputs = [
+        key_input(VK_CONTROL, false),
+        key_input(VK_V, false),
+        key_input(VK_V, true),
+        key_input(VK_CONTROL, true),
+    ];
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,6 +148,8 @@ impl EmojiApp {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
             _ => 0,
         };
+
+        spawn_focus_tracker(hwnd);
 
         // Click trái vào tray -> toggle
         {
@@ -113,7 +199,13 @@ impl EmojiApp {
         if let Ok(mut clipboard) = arboard::Clipboard::new() {
             let _ = clipboard.set_text(url);
         }
-        self.hide();
+        let target = LAST_HWND.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            restore_focus(target);
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            send_ctrl_v();
+        });
     }
 }
 
