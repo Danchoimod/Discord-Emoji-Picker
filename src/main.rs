@@ -211,6 +211,11 @@ impl EmojiApp {
 
 impl eframe::App for EmojiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Chỉ repaint animation khi cửa sổ đang hiển thị để tối ưu hóa CPU
+        if win_is_visible(self.hwnd) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+
         let panel_frame = Frame::default()
             .fill(Color32::from_rgb(30, 31, 34))
             .stroke(Stroke::new(1.0, Color32::from_rgb(50, 52, 57)))
@@ -327,38 +332,49 @@ impl eframe::App for EmojiApp {
                 Tab::Omori2 => emojis::OMORI2_EMOJIS,
             };
 
+            let items: Vec<&str> = emojis_list.iter().copied().filter(|u| !u.is_empty()).collect();
+            const CELL: f32 = 44.0;
+            const GAP: f32 = 8.0;
+
+            ui.spacing_mut().item_spacing = Vec2::new(GAP, GAP);
+
+            // Trừ chừa chỗ cho thanh cuộn (scrollbar)
+            let avail = ui.available_width() - ui.spacing().scroll.bar_width - 4.0;
+            let cols = (((avail + GAP) / (CELL + GAP)).floor() as usize).max(1);
+            let rows = items.len().div_ceil(cols);
+
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                .show_rows(ui, CELL, rows, |ui, row_range| {
+                    for row in row_range {
+                        ui.horizontal(|ui| {
+                            for &url in items.iter().skip(row * cols).take(cols) {
+                                // Bỏ query string để loader nhận diện đuôi .gif
+                                let clean = url.split('?').next().unwrap_or(url);
+                                let display_url = if clean.contains("animated=true") {
+                                    clean.replace(".webp", ".gif")
+                                } else {
+                                    clean.to_string()
+                                };
 
-                        for &url in emojis_list {
-                            if url.is_empty() {
-                                continue;
+                                let img = egui::Image::new(display_url)
+                                    .fit_to_exact_size(Vec2::new(38.0, 38.0))
+                                    .corner_radius(CornerRadius::same(6));
+
+                                let response = ui.add(
+                                    egui::Button::image(img)
+                                        .fill(Color32::from_rgb(43, 45, 49))
+                                        .stroke(Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 10)))
+                                        .corner_radius(CornerRadius::same(8))
+                                        .min_size(Vec2::new(CELL, CELL)),
+                                );
+
+                                if response.clicked() {
+                                    selected_emoji = Some(url);
+                                }
                             }
-
-                            let img = egui::Image::new(url)
-                                .fit_to_exact_size(Vec2::new(38.0, 38.0))
-                                .corner_radius(CornerRadius::same(6));
-
-                            let response = ui.add(
-                                egui::Button::image(img)
-                                    .fill(Color32::from_rgb(43, 45, 49))
-                                    .stroke(Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 10)))
-                                    .corner_radius(CornerRadius::same(8))
-                                    .min_size(Vec2::new(44.0, 44.0)),
-                            );
-
-                            if response.hovered() {
-                                response.clone().highlight();
-                            }
-
-                            if response.clicked() {
-                                selected_emoji = Some(url);
-                            }
-                        }
-                    });
+                        });
+                    }
                 });
         });
 
@@ -408,12 +424,12 @@ fn main() -> Result<(), eframe::Error> {
 
     // 2. Tạo Tray Icon
     let tray_icon = TrayIconBuilder::new()
-        .with_tooltip("Discord Emoji Picker (Rust Native)")
+        .with_tooltip("Discord Emoji Picker")
         .with_icon(create_default_tray_icon())
         .with_menu(Box::new(tray_menu))
         .with_menu_on_left_click(false)
         .build()
-        .expect("Không thể tạo Tray Icon");
+        .expect("Cannot create system tray icon");
 
     // 3. Cấu hình Cửa sổ Picker: Borderless, Always On Top
     let native_options = eframe::NativeOptions {
