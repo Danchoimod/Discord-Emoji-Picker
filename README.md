@@ -1,6 +1,7 @@
 # 🚀 Discord Emoji Picker
 
 A lightweight, blazing-fast desktop widget written in **Rust** powered by the **egui / eframe** GUI framework. It runs as an unobtrusive, always-on-top overlay that lets you select custom emojis/GIFs and **instantly auto-pastes them into Discord** (or any active chat window) with a single click—no Discord Nitro required!
+<img width="1109" height="989" alt="image" src="https://github.com/user-attachments/assets/fde9d78a-802c-45e6-ab25-6bba170eb6dc" />
 
 ---
 
